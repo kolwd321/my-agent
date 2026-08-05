@@ -160,3 +160,27 @@ HTML = """<!DOCTYPE html>
         w.className = 'msg-wrap';
         if(role === 'thinking') {
             w.innerHTML = '<div class="icon ai-icon">S</div><div class="content thinking">Spark is processing...</div>';
+        } else {
+            w.innerHTML = '<div class="icon '+(role==='user'?'user-icon':'ai-icon')+'">'+(role==='user'?'U':'S')+'</div>' + 
+                          '<div class="content">'+(role==='user'?text:marked.parse(text))+'</div>';
+        }
+        c.appendChild(w);
+        c.scrollTop = c.scrollHeight;
+        return w;
+    }
+
+    function clearChat() {
+        const c = document.getElementById('chat');
+        c.innerHTML = '<div class="msg-wrap"><div class="icon ai-icon">S</div><div class="content">Chat history cleared.</div></div>';
+    }
+
+    document.getElementById('p').addEventListener('keydown', function(e) {
+        if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+</script>
+</body>
+</html>
+"""
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
