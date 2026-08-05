@@ -9,10 +9,10 @@ app = Flask(__name__)
 # Setup Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Spark's personality stays the same
+# Your Spark Instructions (The personality)
 BASE_SYSTEM = (
     "You are Spark, a professional AI Assistant. "
-    "Use headings, bold text, and bullet points."
+    "Use headings, bold text, and bullet points to be organized."
 )
 
 @app.route("/")
@@ -27,7 +27,7 @@ def chat():
         if not msg:
             return jsonify({"error": "Empty message."}), 400
 
-        # STABLE LOOP: This is what made it work, so we keep it!
+        # STABLE BACKEND: We know this works for your account!
         last_error = "Unknown error"
         for name in ["gemini-1.5-flash-latest", "gemini-flash-latest", "gemini-1.5-flash"]:
             try:
@@ -53,7 +53,6 @@ HTML = """<!DOCTYPE html>
     <title>Spark AI | Professional</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
-        /* NEW THEME: Professional "Midnight" Claude Style */
         :root { 
             --bg: #0f172a; 
             --sidebar: #1e293b; 
@@ -61,11 +60,9 @@ HTML = """<!DOCTYPE html>
             --text: #f1f5f9; 
             --text-muted: #94a3b8;
             --border: #334155; 
-            --ai-msg: #1e293b;
-            --user-msg: #334155;
         }
         
-        body { font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; display: flex; height: 100vh; background: var(--bg); color: var(--text); }
+        body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; background: var(--bg); color: var(--text); }
         
         aside { 
             width: 260px; background: var(--sidebar); border-right: 1px solid var(--border); 
@@ -97,31 +94,29 @@ HTML = """<!DOCTYPE html>
             background: var(--sidebar); color: var(--text); font-family: inherit;
         }
         
-        /* Sidebar Buttons */
         .side-btn { 
             background: var(--brand); color: #0f172a; border: none; padding: 12px; 
             border-radius: 8px; cursor: pointer; font-weight: bold; transition: 0.2s; 
             text-align: center; font-size: 14px;
         }
-        .side-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+        .side-btn:hover { opacity: 0.9; }
         .clear-btn { background: transparent; border: 1px solid var(--border); color: var(--text-muted); }
-        .clear-btn:hover { border-color: #ef4444; color: #ef4444; }
 
         .thinking { color: var(--text-muted); font-style: italic; font-size: 13px; margin-top: 5px; }
     </style>
 </head>
 <body>
     <aside>
-        <div style="font-size: 20px; font-weight: bold; margin-bottom: 10px;">✧ Spark AI</div>
+        <div style="font-size: 20px; font-weight: bold; margin-bottom: 10px;">Spark AI</div>
         <button class="side-btn" onclick="location.reload()">+ New Session</button>
-        <button class="side-btn clear-btn" onclick="clearChat()">🗑 Clear Screen</button>
-        <div style="margin-top: auto; font-size: 11px; color: var(--text-muted);">v2.1 | Stable Mode</div>
+        <button class="side-btn clear-btn" onclick="clearChat()">Clear Screen</button>
+        <div style="margin-top: auto; font-size: 11px; color: var(--text-muted);">v2.2 | Stable</div>
     </aside>
     
     <main>
         <div id="chat">
             <div class="msg-wrap">
-                <div class="icon ai-icon">✧</div>
+                <div class="icon ai-icon">S</div>
                 <div class="content">Spark online. System status is green. How can I help?</div>
             </div>
         </div>
@@ -150,9 +145,13 @@ HTML = """<!DOCTYPE html>
             });
             const d = await r.json();
             t.remove();
-            if(d.error) add('ai', '⚠️ Error: ' + d.error);
+            if(d.error) add('ai', 'Error: ' + d.error);
             else add('ai', d.reply);
-        } catch(err) { t.remove(); add('ai', '⚠️ Connection lost.'); }
+        } catch(err) { 
+            t.remove(); 
+            add('ai', 'Connection failed. Please refresh.'); 
+        }
+        document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
     }
 
     function add(role, text) {
@@ -160,24 +159,4 @@ HTML = """<!DOCTYPE html>
         const w = document.createElement('div');
         w.className = 'msg-wrap';
         if(role === 'thinking') {
-            w.innerHTML = '<div class="icon ai-icon">✧</div><div class="content thinking">Spark is processing...</div>';
-        } else {
-            w.innerHTML = '<div class="icon '+(role==='user'?'user-icon':'ai-icon')+'">'+(role==='user'?'U':'✧')+'</div>' + 
-                          '<div class="content">'+(role==='user'?text:marked.parse(text))+'</div>';
-        }
-        c.appendChild(w);
-        c.scrollTop = c.scrollHeight;
-        return w;
-    }
-
-    function clearChat() {
-        const c = document.getElementById('chat');
-        c.innerHTML = '<div class="msg-wrap"><div class="icon ai-icon">✧</div><div class="content">Chat history cleared.</div></div>';
-    }
-
-    document.getElementById('p').addEventListener('keydown', function(e) {
-        if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-    });
-</script>
-</body>
-</html>
+            w.innerHTML = '<div class="icon ai-icon">S</div><div class="content thinking">Spark is processing...</div>';
