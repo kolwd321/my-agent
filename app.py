@@ -10,7 +10,7 @@ app = Flask(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Model and Debug settings
-MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
 
 # Professional system prompt
 BASE_SYSTEM = (
