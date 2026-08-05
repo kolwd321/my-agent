@@ -9,18 +9,10 @@ app = Flask(__name__)
 # Setup Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# The instructions for Spark
+# Your Spark Instructions
 BASE_SYSTEM = (
     "You are Spark, a professional AI Assistant. "
-    "Use clear headings, bold text, and bullet points. "
-    "Keep answers concise and professional."
-)
-
-# Start a professional chat session (this handles history automatically)
-# We use gemini-1.5-flash because it has the best free limits
-chat_session = client.chats.create(
-    model="gemini-1.5-flash",
-    config={"system_instruction": BASE_SYSTEM}
+    "Use headings, bold text, and bullet points to be organized."
 )
 
 @app.route("/")
@@ -33,16 +25,25 @@ def chat():
         d = request.get_json()
         msg = (d.get("message") or "").strip()
         if not msg:
-            return jsonify({"error": "No message."}), 400
+            return jsonify({"error": "Empty message."}), 400
 
-        # We let the 'chat_session' object handle the history for us
-        # This is MUCH more stable and prevents the 404/formatting errors
-        response = chat_session.send_message(msg)
+        # We use your ORIGINAL loop because we know it works for your account!
+        last_error = "Unknown error"
+        for name in ["gemini-1.5-flash-latest", "gemini-flash-latest", "gemini-1.5-flash"]:
+            try:
+                response = client.models.generate_content(
+                    model=name, 
+                    config={'system_instruction': BASE_SYSTEM}, 
+                    contents=msg # Simple string content (no complex memory yet)
+                )
+                return jsonify({"reply": response.text})
+            except Exception as e:
+                last_error = str(e)
+                continue
         
-        return jsonify({"reply": response.text})
+        return jsonify({"error": f"Connection failed: {last_error}"}), 500
 
     except Exception as e:
-        # If the API is being weird, we show the message
         return jsonify({"error": str(e)}), 500
 
 HTML = """<!DOCTYPE html>
@@ -69,7 +70,7 @@ HTML = """<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <aside><strong>Spark Agent</strong><br><small>Ready</small></aside>
+    <aside><strong>Spark Agent</strong><br><small>Online</small></aside>
     <main>
         <div id="chat"><div class="msg-wrap"><div class="icon ai-icon">✧</div><div class="content">Spark online. How can I assist you today?</div></div></div>
         <div class="input-box">
@@ -118,4 +119,5 @@ HTML = """<!DOCTYPE html>
 """
 
 if __name__ == "__main__":
+    # Use standard Render port handling
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
