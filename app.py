@@ -1,4 +1,4 @@
-import os, json, time
+import os, json
 from flask import Flask, request, jsonify
 from google import genai
 from dotenv import load_dotenv
@@ -9,12 +9,12 @@ app = Flask(__name__)
 # Setup Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Use the model that we KNOW works on your account
-MODEL_ID = "gemini-2.0-flash"
+# Your original code used this name and it worked!
+MODEL_ID = "gemini-1.5-flash-latest"
 
 BASE_SYSTEM = (
-    "You are Spark, a professional AI. Use bold text and bullet points. "
-    "Be concise to save API quota."
+    "You are Spark, a professional AI Assistant. "
+    "Use clear headings, bold text, and bullet points."
 )
 
 # Shared memory
@@ -33,41 +33,29 @@ def chat():
         if not msg:
             return jsonify({"error": "Empty message."}), 400
 
-        # Add user message
+        # Add user message to memory
         HISTORY.append({"role": "user", "parts": [{"text": msg}]})
 
-        # Try to get a response
-        try:
-            response = client.models.generate_content(
-                model=MODEL_ID,
-                config={"system_instruction": BASE_SYSTEM},
-                contents=HISTORY,
-            )
-            
-            reply = response.text
-            HISTORY.append({"role": "model", "parts": [{"text": reply}]})
+        # Generate response
+        response = client.models.generate_content(
+            model=MODEL_ID,
+            config={"system_instruction": BASE_SYSTEM},
+            contents=HISTORY
+        )
+        
+        reply = response.text
+        
+        # Add assistant reply to memory
+        HISTORY.append({"role": "model", "parts": [{"text": reply}]})
 
-            # Keep history VERY short (last 6 messages) to avoid 429/Resource errors
-            if len(HISTORY) > 6:
-                HISTORY = HISTORY[-6:]
+        # Keep history short (last 10 messages)
+        if len(HISTORY) > 10:
+            HISTORY = HISTORY[-10:]
 
-            return jsonify({"reply": reply})
-
-        except Exception as e:
-            error_msg = str(e)
-            # If we hit the '429' Resource limit, clear memory and try one last time
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                HISTORY = [{"role": "user", "parts": [{"text": msg}]}]
-                response = client.models.generate_content(
-                    model=MODEL_ID,
-                    config={"system_instruction": BASE_SYSTEM},
-                    contents=HISTORY
-                )
-                return jsonify({"reply": response.text + "\\n\\n*(Note: Memory was cleared to save quota)*"})
-            
-            return jsonify({"error": error_msg}), 500
+        return jsonify({"reply": reply})
 
     except Exception as e:
+        # If gemini-1.5-flash-latest fails, we tell you exactly why
         return jsonify({"error": str(e)}), 500
 
 HTML = """<!DOCTYPE html>
@@ -94,12 +82,12 @@ HTML = """<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <aside><strong>Spark Agent</strong><br><small>Ready</small></aside>
+    <aside><strong>Spark Agent</strong><br><small>Status: Online</small></aside>
     <main>
-        <div id="chat"><div class="msg-wrap"><div class="icon ai-icon">✧</div><div class="content">Spark online. How can I help?</div></div></div>
+        <div id="chat"><div class="msg-wrap"><div class="icon ai-icon">✧</div><div class="content">Spark online. How can I assist you today?</div></div></div>
         <div class="input-box">
             <form class="input-inner" onsubmit="send(event)">
-                <textarea id="p" rows="1" placeholder="Type here..."></textarea>
+                <textarea id="p" rows="1" placeholder="Type a message..."></textarea>
             </form>
         </div>
     </main>
