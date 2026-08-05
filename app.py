@@ -9,20 +9,14 @@ app = Flask(__name__)
 # Setup Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Model and Debug settings
-MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
-
-# Professional system prompt
+# The "Claude-style" instructions
 BASE_SYSTEM = (
-    "You are a premium, enterprise-grade AI Assistant named Spark.\n"
-    "Personality: Helpful, precise, calm, and professional.\n\n"
-    "Rules:\n"
-    "1. Use Markdown for structure.\n"
-    "2. If you don't know an answer, say so.\n"
-    "3. Keep a professional tone."
+    "You are Spark, a professional AI Assistant. "
+    "Use clear headings, bold text, and bullet points. "
+    "Be precise, helpful, and maintain a premium tone."
 )
 
-# Memory
+# This holds the conversation memory
 HISTORY = []
 
 @app.route("/")
@@ -35,25 +29,38 @@ def chat():
         d = request.get_json()
         msg = (d.get("message") or "").strip()
         if not msg:
-            return jsonify({"error": "Empty message."}), 400
+            return jsonify({"error": "No message provided."}), 400
 
-        # Add to history
+        # 1. Add the user message to history
         HISTORY.append({"role": "user", "parts": [{"text": msg}]})
 
-        # Generate response
-        response = client.models.generate_content(
-            model=MODEL,
-            config={"system_instruction": BASE_SYSTEM},
-            contents=HISTORY,
-        )
+        # 2. Try the models in order of stability
+        # We use a loop so if one is '404' or 'Busy', it tries the next one automatically
+        last_error = "Unknown error"
+        for model_name in ["gemini-1.5-flash", "gemini-1.5-flash-001", "gemini-1.5-flash-latest"]:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    config={"system_instruction": BASE_SYSTEM},
+                    contents=HISTORY,
+                )
+                
+                reply_text = response.text
+                
+                # 3. Save the AI's reply to history
+                HISTORY.append({"role": "model", "parts": [{"text": reply_text}]})
+
+                # Keep history short to stay within free limits (last 10 messages)
+                if len(HISTORY) > 10:
+                    HISTORY.pop(0)
+
+                return jsonify({"reply": reply_text})
+            except Exception as e:
+                last_error = str(e)
+                continue # Try the next model name
         
-        reply = response.text
-        HISTORY.append({"role": "model", "parts": [{"text": reply}]})
+        return jsonify({"error": f"API Error: {last_error}"}), 500
 
-        if len(HISTORY) > 20:
-            HISTORY.pop(0)
-
-        return jsonify({"reply": reply})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -97,7 +104,7 @@ HTML = """<!DOCTYPE html>
         <div id="chat">
             <div class="msg-wrap">
                 <div class="icon ai-icon">✧</div>
-                <div class="content">Professional systems active. How can I assist you today?</div>
+                <div class="content">Systems online. I am Spark. How can I assist you?</div>
             </div>
         </div>
         <div class="input-box">
@@ -127,9 +134,7 @@ HTML = """<!DOCTYPE html>
                 think.innerHTML = '<span style="color:#ef4444;">' + d.error + '</span>';
             } else {
                 const w = think.closest('.msg-wrap');
-                w.innerHTML = '<div class="icon ai-icon">✧</div>' +
-                              '<div class="content">' + marked.parse(d.reply) +
-                              '<button class="copy-btn" onclick="copy(this)">Copy Text</button></div>';
+                w.innerHTML = '<div class="icon ai-icon">✧</div><div class="content">' + marked.parse(d.reply) + '<button class="copy-btn" onclick="copy(this)">Copy Text</button></div>';
                 w.dataset.raw = d.reply;
             }
         } catch(err) {
