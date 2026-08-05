@@ -9,16 +9,19 @@ app = Flask(__name__)
 # Setup Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Your original code used this name and it worked!
-MODEL_ID = "gemini-1.5-flash-latest"
-
+# The instructions for Spark
 BASE_SYSTEM = (
     "You are Spark, a professional AI Assistant. "
-    "Use clear headings, bold text, and bullet points."
+    "Use clear headings, bold text, and bullet points. "
+    "Keep answers concise and professional."
 )
 
-# Shared memory
-HISTORY = []
+# Start a professional chat session (this handles history automatically)
+# We use gemini-1.5-flash because it has the best free limits
+chat_session = client.chats.create(
+    model="gemini-1.5-flash",
+    config={"system_instruction": BASE_SYSTEM}
+)
 
 @app.route("/")
 def index():
@@ -26,36 +29,20 @@ def index():
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    global HISTORY
     try:
         d = request.get_json()
         msg = (d.get("message") or "").strip()
         if not msg:
-            return jsonify({"error": "Empty message."}), 400
+            return jsonify({"error": "No message."}), 400
 
-        # Add user message to memory
-        HISTORY.append({"role": "user", "parts": [{"text": msg}]})
-
-        # Generate response
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            config={"system_instruction": BASE_SYSTEM},
-            contents=HISTORY
-        )
+        # We let the 'chat_session' object handle the history for us
+        # This is MUCH more stable and prevents the 404/formatting errors
+        response = chat_session.send_message(msg)
         
-        reply = response.text
-        
-        # Add assistant reply to memory
-        HISTORY.append({"role": "model", "parts": [{"text": reply}]})
-
-        # Keep history short (last 10 messages)
-        if len(HISTORY) > 10:
-            HISTORY = HISTORY[-10:]
-
-        return jsonify({"reply": reply})
+        return jsonify({"reply": response.text})
 
     except Exception as e:
-        # If gemini-1.5-flash-latest fails, we tell you exactly why
+        # If the API is being weird, we show the message
         return jsonify({"error": str(e)}), 500
 
 HTML = """<!DOCTYPE html>
@@ -82,7 +69,7 @@ HTML = """<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <aside><strong>Spark Agent</strong><br><small>Status: Online</small></aside>
+    <aside><strong>Spark Agent</strong><br><small>Ready</small></aside>
     <main>
         <div id="chat"><div class="msg-wrap"><div class="icon ai-icon">✧</div><div class="content">Spark online. How can I assist you today?</div></div></div>
         <div class="input-box">
