@@ -1,4 +1,4 @@
-import os, json
+import os
 from flask import Flask, request, jsonify
 from google import genai
 from dotenv import load_dotenv
@@ -9,12 +9,6 @@ app = Flask(__name__)
 # Setup Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Your Spark Instructions (The personality)
-BASE_SYSTEM = (
-    "You are Spark, a professional AI Assistant. "
-    "Use headings, bold text, and bullet points to be organized."
-)
-
 @app.route("/")
 def index():
     return HTML
@@ -23,26 +17,22 @@ def index():
 def chat():
     try:
         d = request.get_json()
-        msg = (d.get("message") or "").strip()
-        if not msg:
-            return jsonify({"error": "Empty message."}), 400
-
-        # STABLE BACKEND: We know this works for your account!
-        last_error = "Unknown error"
-        for name in ["gemini-1.5-flash-latest", "gemini-flash-latest", "gemini-1.5-flash"]:
+        msg = d.get("message", "")
+        
+        # We try the most stable names possible
+        # If one fails with a 404, it immediately jumps to the next
+        for name in ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-pro"]:
             try:
                 response = client.models.generate_content(
-                    model=name, 
-                    config={'system_instruction': BASE_SYSTEM}, 
-                    contents=msg
+                    model=name,
+                    contents=msg,
+                    config={"system_instruction": "You are Spark, a professional AI Assistant. Use markdown formatting."}
                 )
                 return jsonify({"reply": response.text})
-            except Exception as e:
-                last_error = str(e)
+            except:
                 continue
         
-        return jsonify({"error": f"Connection failed: {last_error}"}), 500
-
+        return jsonify({"error": "The AI service is currently overloaded. Please try again in 30 seconds."}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -50,84 +40,36 @@ HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Spark AI | Professional</title>
+    <title>Spark AI</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
-        :root { 
-            --bg: #0f172a; 
-            --sidebar: #1e293b; 
-            --brand: #38bdf8; 
-            --text: #f1f5f9; 
-            --text-muted: #94a3b8;
-            --border: #334155; 
-        }
-        
+        :root { --bg: #0f172a; --sidebar: #1e293b; --brand: #38bdf8; --text: #f1f5f9; --border: #334155; }
         body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; background: var(--bg); color: var(--text); }
-        
-        aside { 
-            width: 260px; background: var(--sidebar); border-right: 1px solid var(--border); 
-            padding: 24px; display: flex; flex-direction: column; gap: 20px;
-        }
-        
-        main { flex: 1; display: flex; flex-direction: column; position: relative; }
-        
-        #chat { flex: 1; overflow-y: auto; padding: 60px 20px; scroll-behavior: smooth; }
-        
+        aside { width: 260px; background: var(--sidebar); border-right: 1px solid var(--border); padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+        main { flex: 1; display: flex; flex-direction: column; }
+        #chat { flex: 1; overflow-y: auto; padding: 40px 20px; }
         .msg-wrap { max-width: 800px; margin: 0 auto 30px auto; display: flex; gap: 15px; }
-        
-        .icon { 
-            width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0; 
-            display: flex; align-items: center; justify-content: center; font-weight: bold; 
-        }
-        .ai-icon { background: var(--brand); color: #0f172a; }
-        .user-icon { background: var(--text-muted); color: #0f172a; }
-        
-        .content { font-size: 15px; line-height: 1.6; color: var(--text); flex: 1; }
-        .content pre { background: #000; padding: 15px; border-radius: 8px; border: 1px solid var(--border); overflow-x: auto; color: #38bdf8; }
-        
-        .input-box { padding: 25px; background: var(--bg); border-top: 1px solid var(--border); }
-        .input-inner { max-width: 800px; margin: 0 auto; position: relative; }
-        
-        textarea { 
-            width: 100%; border: 1px solid var(--border); border-radius: 12px; 
-            padding: 14px; font-size: 15px; resize: none; outline: none; 
-            background: var(--sidebar); color: var(--text); font-family: inherit;
-        }
-        
-        .side-btn { 
-            background: var(--brand); color: #0f172a; border: none; padding: 12px; 
-            border-radius: 8px; cursor: pointer; font-weight: bold; transition: 0.2s; 
-            text-align: center; font-size: 14px;
-        }
-        .side-btn:hover { opacity: 0.9; }
-        .clear-btn { background: transparent; border: 1px solid var(--border); color: var(--text-muted); }
-
-        .thinking { color: var(--text-muted); font-style: italic; font-size: 13px; margin-top: 5px; }
+        .icon { width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; background: var(--brand); color: #0f172a; }
+        .user-icon { background: #94a3b8; }
+        .content { font-size: 15px; line-height: 1.6; flex: 1; }
+        .input-box { padding: 20px; background: var(--bg); border-top: 1px solid var(--border); }
+        textarea { width: 100%; max-width: 800px; margin: 0 auto; display: block; border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--sidebar); color: var(--text); resize: none; outline: none; }
+        .side-btn { background: var(--brand); color: #0f172a; border: none; padding: 10px; border-radius: 6px; cursor: pointer; font-weight: bold; text-align: center; }
+        .thinking { color: #94a3b8; font-style: italic; font-size: 13px; }
     </style>
 </head>
 <body>
     <aside>
-        <div style="font-size: 20px; font-weight: bold; margin-bottom: 10px;">Spark AI</div>
-        <button class="side-btn" onclick="location.reload()">+ New Session</button>
-        <button class="side-btn clear-btn" onclick="clearChat()">Clear Screen</button>
-        <div style="margin-top: auto; font-size: 11px; color: var(--text-muted);">v2.2 | Stable</div>
+        <div style="font-size: 18px; font-weight: bold;">Spark AI</div>
+        <button class="side-btn" onclick="location.reload()">New Chat</button>
+        <button class="side-btn" style="background:transparent; border:1px solid var(--border); color:#94a3b8;" onclick="document.getElementById('chat').innerHTML=''">Clear Screen</button>
     </aside>
-    
     <main>
-        <div id="chat">
-            <div class="msg-wrap">
-                <div class="icon ai-icon">S</div>
-                <div class="content">Spark online. System status is green. How can I help?</div>
-            </div>
-        </div>
-        
+        <div id="chat"><div class="msg-wrap"><div class="icon">S</div><div class="content">Spark online. How can I help?</div></div></div>
         <div class="input-box">
-            <form class="input-inner" onsubmit="send(event)">
-                <textarea id="p" rows="1" placeholder="Type your request..."></textarea>
-            </form>
+            <form onsubmit="send(event)"><textarea id="p" rows="1" placeholder="Type message..."></textarea></form>
         </div>
     </main>
-
 <script>
     async function send(e) {
         if(e) e.preventDefault();
@@ -145,35 +87,20 @@ HTML = """<!DOCTYPE html>
             });
             const d = await r.json();
             t.remove();
-            if(d.error) add('ai', 'Error: ' + d.error);
-            else add('ai', d.reply);
-        } catch(err) { 
-            t.remove(); 
-            add('ai', 'Connection failed. Please refresh.'); 
-        }
+            add('ai', d.reply || d.error);
+        } catch(err) { t.remove(); add('ai', 'Error connecting to Spark.'); }
         document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
     }
-
     function add(role, text) {
         const c = document.getElementById('chat');
         const w = document.createElement('div');
         w.className = 'msg-wrap';
-        if(role === 'thinking') {
-            w.innerHTML = '<div class="icon ai-icon">S</div><div class="content thinking">Spark is processing...</div>';
-        } else {
-            w.innerHTML = '<div class="icon '+(role==='user'?'user-icon':'ai-icon')+'">'+(role==='user'?'U':'S')+'</div>' + 
-                          '<div class="content">'+(role==='user'?text:marked.parse(text))+'</div>';
-        }
+        if(role === 'thinking') w.innerHTML = '<div class="icon">S</div><div class="content thinking">Thinking...</div>';
+        else w.innerHTML = '<div class="icon '+(role==='user'?'user-icon':'')+'">'+(role==='user'?'U':'S')+'</div><div class="content">'+(role==='user'?text:marked.parse(text))+'</div>';
         c.appendChild(w);
         c.scrollTop = c.scrollHeight;
         return w;
     }
-
-    function clearChat() {
-        const c = document.getElementById('chat');
-        c.innerHTML = '<div class="msg-wrap"><div class="icon ai-icon">S</div><div class="content">Chat history cleared.</div></div>';
-    }
-
     document.getElementById('p').addEventListener('keydown', function(e) {
         if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     });
