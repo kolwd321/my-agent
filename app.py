@@ -9,6 +9,9 @@ app = Flask(__name__)
 # Setup Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+# Your original system prompt
+BASE_SYSTEM = "You are a premium, enterprise-grade AI Assistant. Use professional formatting, bolding, and clear headings."
+
 @app.route("/")
 def index():
     return HTML
@@ -17,22 +20,21 @@ def index():
 def chat():
     try:
         d = request.get_json()
-        msg = d.get("message", "")
+        msg = d.get("message", "").strip()
         
-        # We try the most stable names possible
-        # If one fails with a 404, it immediately jumps to the next
-        for name in ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-pro"]:
+        # This is your EXACT original loop that you confirmed worked!
+        for name in ["gemini-1.5-flash-latest", "gemini-flash-latest", "gemini-1.5-flash"]:
             try:
                 response = client.models.generate_content(
-                    model=name,
-                    contents=msg,
-                    config={"system_instruction": "You are Spark, a professional AI Assistant. Use markdown formatting."}
+                    model=name, 
+                    config={'system_instruction': BASE_SYSTEM}, 
+                    contents=msg
                 )
                 return jsonify({"reply": response.text})
-            except:
+            except: 
                 continue
         
-        return jsonify({"error": "The AI service is currently overloaded. Please try again in 30 seconds."}), 500
+        return jsonify({"error": "All models are currently busy. Please try again in a moment."}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -87,7 +89,8 @@ HTML = """<!DOCTYPE html>
             });
             const d = await r.json();
             t.remove();
-            add('ai', d.reply || d.error);
+            if(d.reply) add('ai', d.reply);
+            else add('ai', 'Error: ' + (d.error || 'Unknown failure'));
         } catch(err) { t.remove(); add('ai', 'Error connecting to Spark.'); }
         document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
     }
