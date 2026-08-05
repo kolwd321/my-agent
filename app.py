@@ -1,4 +1,4 @@
-import os, json
+import os, json, time
 from flask import Flask, request, jsonify
 from google import genai
 from dotenv import load_dotenv
@@ -9,14 +9,15 @@ app = Flask(__name__)
 # Setup Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# The "Claude-style" instructions
+# Use the model that we KNOW works on your account
+MODEL_ID = "gemini-2.0-flash"
+
 BASE_SYSTEM = (
-    "You are Spark, a professional AI Assistant. "
-    "Use clear headings, bold text, and bullet points. "
-    "Be precise, helpful, and maintain a premium tone."
+    "You are Spark, a professional AI. Use bold text and bullet points. "
+    "Be concise to save API quota."
 )
 
-# This holds the conversation memory
+# Shared memory
 HISTORY = []
 
 @app.route("/")
@@ -25,41 +26,46 @@ def index():
 
 @app.route("/chat", methods=["POST"])
 def chat():
+    global HISTORY
     try:
         d = request.get_json()
         msg = (d.get("message") or "").strip()
         if not msg:
-            return jsonify({"error": "No message provided."}), 400
+            return jsonify({"error": "Empty message."}), 400
 
-        # 1. Add the user message to history
+        # Add user message
         HISTORY.append({"role": "user", "parts": [{"text": msg}]})
 
-        # 2. Try the models in order of stability
-        # We use a loop so if one is '404' or 'Busy', it tries the next one automatically
-        last_error = "Unknown error"
-        for model_name in ["gemini-1.5-flash", "gemini-1.5-flash-001", "gemini-1.5-flash-latest"]:
-            try:
+        # Try to get a response
+        try:
+            response = client.models.generate_content(
+                model=MODEL_ID,
+                config={"system_instruction": BASE_SYSTEM},
+                contents=HISTORY,
+            )
+            
+            reply = response.text
+            HISTORY.append({"role": "model", "parts": [{"text": reply}]})
+
+            # Keep history VERY short (last 6 messages) to avoid 429/Resource errors
+            if len(HISTORY) > 6:
+                HISTORY = HISTORY[-6:]
+
+            return jsonify({"reply": reply})
+
+        except Exception as e:
+            error_msg = str(e)
+            # If we hit the '429' Resource limit, clear memory and try one last time
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                HISTORY = [{"role": "user", "parts": [{"text": msg}]}]
                 response = client.models.generate_content(
-                    model=model_name,
+                    model=MODEL_ID,
                     config={"system_instruction": BASE_SYSTEM},
-                    contents=HISTORY,
+                    contents=HISTORY
                 )
-                
-                reply_text = response.text
-                
-                # 3. Save the AI's reply to history
-                HISTORY.append({"role": "model", "parts": [{"text": reply_text}]})
-
-                # Keep history short to stay within free limits (last 10 messages)
-                if len(HISTORY) > 10:
-                    HISTORY.pop(0)
-
-                return jsonify({"reply": reply_text})
-            except Exception as e:
-                last_error = str(e)
-                continue # Try the next model name
-        
-        return jsonify({"error": f"API Error: {last_error}"}), 500
+                return jsonify({"reply": response.text + "\\n\\n*(Note: Memory was cleared to save quota)*"})
+            
+            return jsonify({"error": error_msg}), 500
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -68,49 +74,32 @@ HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Enterprise AI Platform</title>
+    <title>Spark AI</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
-        :root { --bg: #ffffff; --sidebar: #f8fafc; --brand: #2563eb; --text: #1e293b; --border: #e2e8f0; }
+        :root { --bg: #ffffff; --brand: #2563eb; --text: #1e293b; --border: #e2e8f0; }
         body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; background: var(--bg); color: var(--text); }
-        aside { width: 260px; background: var(--sidebar); border-right: 1px solid var(--border); padding: 24px; display: flex; flex-direction: column; }
-        main { flex: 1; display: flex; flex-direction: column; position: relative; }
-        #chat { flex: 1; overflow-y: auto; padding: 60px 20px; }
-        .msg-wrap { max-width: 800px; margin: 0 auto 40px auto; display: flex; gap: 20px; }
-        .icon { width: 36px; height: 36px; border-radius: 8px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; }
+        aside { width: 260px; background: #f8fafc; border-right: 1px solid var(--border); padding: 24px; }
+        main { flex: 1; display: flex; flex-direction: column; }
+        #chat { flex: 1; overflow-y: auto; padding: 40px 20px; }
+        .msg-wrap { max-width: 800px; margin: 0 auto 30px auto; display: flex; gap: 15px; }
+        .icon { width: 30px; height: 30px; border-radius: 6px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; }
         .ai-icon { background: #eff6ff; color: var(--brand); }
         .user-icon { background: #f1f5f9; color: #64748b; }
-        .content { font-size: 16px; line-height: 1.7; color: #334155; flex: 1; }
-        .content pre { background: #f3f4f6; padding: 15px; border-radius: 8px; overflow-x: auto; }
-        .input-box { padding: 30px; position: sticky; bottom: 0; background: white; }
-        .input-inner { max-width: 800px; margin: 0 auto; position: relative; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); border-radius: 12px; }
-        textarea { width: 100%; border: 1px solid var(--border); border-radius: 12px; padding: 16px 50px 16px 16px; font-size: 16px; resize: none; outline: none; font-family: inherit; }
-        .send-btn { position: absolute; right: 10px; bottom: 10px; background: var(--brand); color: white; border: none; padding: 8px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; }
-        .copy-btn { margin-top: 10px; background: none; border: 1px solid #e2e8f0; padding: 4px 8px; font-size: 11px; color: #94a3b8; cursor: pointer; border-radius: 4px; }
-        .thinking { color: #94a3b8; font-style: italic; }
-        .dot { display: inline-block; animation: blink 1.2s infinite; }
-        .dot:nth-child(2) { animation-delay: 0.2s; }
-        .dot:nth-child(3) { animation-delay: 0.4s; }
-        @keyframes blink { 0%,80%,100% {opacity:0.2} 40% {opacity:1} }
+        .content { font-size: 15px; line-height: 1.6; flex: 1; }
+        .input-box { padding: 20px; background: white; border-top: 1px solid var(--border); }
+        .input-inner { max-width: 800px; margin: 0 auto; position: relative; }
+        textarea { width: 100%; border: 1px solid var(--border); border-radius: 10px; padding: 12px; font-size: 15px; resize: none; outline: none; }
+        .thinking { color: #94a3b8; font-style: italic; font-size: 13px; }
     </style>
 </head>
 <body>
-    <aside>
-        <div style="background:white; border:1px solid #e2e8f0; padding:10px; border-radius:8px; text-align:center; cursor:pointer; font-size:14px;" onclick="location.reload()">+ New Chat</div>
-        <div style="font-size:11px; font-weight:bold; color:#94a3b8; margin: 20px 0 10px 0;">WORKSPACE</div>
-        <div style="font-size:13px; color:#64748b;">Active Session</div>
-    </aside>
+    <aside><strong>Spark Agent</strong><br><small>Ready</small></aside>
     <main>
-        <div id="chat">
-            <div class="msg-wrap">
-                <div class="icon ai-icon">✧</div>
-                <div class="content">Systems online. I am Spark. How can I assist you?</div>
-            </div>
-        </div>
+        <div id="chat"><div class="msg-wrap"><div class="icon ai-icon">✧</div><div class="content">Spark online. How can I help?</div></div></div>
         <div class="input-box">
             <form class="input-inner" onsubmit="send(event)">
-                <textarea id="p" rows="1" placeholder="Enter request..." autocomplete="off"></textarea>
-                <button type="submit" class="send-btn">Send</button>
+                <textarea id="p" rows="1" placeholder="Type here..."></textarea>
             </form>
         </div>
     </main>
@@ -122,7 +111,7 @@ HTML = """<!DOCTYPE html>
         if(!m) return;
         add('user', m);
         i.value = '';
-        const think = add('thinking');
+        const t = add('thinking');
         try {
             const r = await fetch('/chat', {
                 method: 'POST',
@@ -130,39 +119,20 @@ HTML = """<!DOCTYPE html>
                 body: JSON.stringify({message: m})
             });
             const d = await r.json();
-            if(d.error) {
-                think.innerHTML = '<span style="color:#ef4444;">' + d.error + '</span>';
-            } else {
-                const w = think.closest('.msg-wrap');
-                w.innerHTML = '<div class="icon ai-icon">✧</div><div class="content">' + marked.parse(d.reply) + '<button class="copy-btn" onclick="copy(this)">Copy Text</button></div>';
-                w.dataset.raw = d.reply;
-            }
-        } catch(err) {
-            think.innerHTML = '<span style="color:#ef4444;">Failed to connect.</span>';
-        }
-        document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
+            t.remove();
+            if(d.error) add('ai', 'Error: ' + d.error);
+            else add('ai', d.reply);
+        } catch(err) { t.remove(); add('ai', 'Connection failed.'); }
     }
     function add(role, text) {
         const c = document.getElementById('chat');
         const w = document.createElement('div');
         w.className = 'msg-wrap';
-        if(role === 'thinking') {
-            w.innerHTML = '<div class="icon ai-icon">✧</div><div class="content thinking">Thinking<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span></div>';
-        } else if(role === 'user') {
-            w.innerHTML = '<div class="icon user-icon">U</div><div class="content">' + text + '</div>';
-        } else {
-            w.innerHTML = '<div class="icon ai-icon">✧</div><div class="content">' + marked.parse(text) + '<button class="copy-btn" onclick="copy(this)">Copy Text</button></div>';
-            w.dataset.raw = text;
-        }
+        if(role === 'thinking') w.innerHTML = '<div class="icon ai-icon">✧</div><div class="content thinking">Spark is thinking...</div>';
+        else w.innerHTML = '<div class="icon '+(role==='user'?'user-icon':'ai-icon')+'">'+(role==='user'?'U':'✧')+'</div><div class="content">'+(role==='user'?text:marked.parse(text))+'</div>';
         c.appendChild(w);
         c.scrollTop = c.scrollHeight;
         return w;
-    }
-    function copy(btn) {
-        const text = btn.closest('.msg-wrap').dataset.raw;
-        navigator.clipboard.writeText(text);
-        btn.innerText = 'Copied!';
-        setTimeout(function(){ btn.innerText = 'Copy Text'; }, 2000);
     }
     document.getElementById('p').addEventListener('keydown', function(e) {
         if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
