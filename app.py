@@ -3,9 +3,12 @@ import os
 import time
 from collections import defaultdict, deque
 
+import json
+import urllib.error
+import urllib.request
+
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
-from google import genai
 
 load_dotenv()
 
@@ -14,15 +17,36 @@ log = logging.getLogger("spark")
 
 app = Flask(__name__)
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
-# Newest first; the loop falls back if a name isn't available on your key.
+# Cheapest first; the loop falls back if a name is rejected.
 MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-flash-latest",
+    os.getenv("SPARK_MODEL", "claude-haiku-4-5"),
+    "claude-sonnet-4-5",
 ]
+
+
+def call_claude(model: str, system: str, messages: list) -> str:
+    payload = json.dumps({
+        "model": model,
+        "max_tokens": 1500,
+        "system": system,
+        "messages": messages,
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "content-type": "application/json",
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read().decode())
+    parts = data.get("content") or []
+    return "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
 
 BASE_SYSTEM = (
     "You are Spark, an elite executive AI consultant.\n"
@@ -66,7 +90,7 @@ def index():
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "key_configured": bool(os.getenv("GEMINI_API_KEY"))})
+    return jsonify({"status": "ok", "key_configured": bool(ANTHROPIC_API_KEY)})
 
 
 @app.route("/chat", methods=["POST"])
@@ -82,32 +106,38 @@ def chat():
     if len(msg) > MAX_MESSAGE_CHARS:
         return jsonify({"error": f"Message too long (max {MAX_MESSAGE_CHARS} characters)."}), 400
 
+    if not ANTHROPIC_API_KEY:
+        return jsonify({"error": "Server is missing ANTHROPIC_API_KEY - set it in Render > Environment."}), 500
+
     # ---- Conversation memory ----
     # The browser sends prior turns as [{role: "user"|"model", text: "..."}].
-    # We rebuild them into the format Gemini expects, capped to the recent past.
-    contents = []
+    # We rebuild them into the format Claude expects, capped to the recent past.
+    messages = []
     history = data.get("history") or []
     if isinstance(history, list):
         for turn in history[-MAX_HISTORY_MESSAGES:]:
             role = turn.get("role")
             text = (turn.get("text") or "").strip()
             if role in ("user", "model") and text:
-                contents.append({"role": role, "parts": [{"text": text[:MAX_MESSAGE_CHARS]}]})
-    contents.append({"role": "user", "parts": [{"text": msg}]})
+                messages.append({
+                    "role": "user" if role == "user" else "assistant",
+                    "content": text[:MAX_MESSAGE_CHARS],
+                })
+    messages.append({"role": "user", "content": msg})
 
     last_error = None
     for name in MODELS:
         try:
-            response = client.models.generate_content(
-                model=name,
-                config={"system_instruction": BASE_SYSTEM},
-                contents=contents,
-            )
-            reply = (response.text or "").strip()
+            reply = call_claude(name, BASE_SYSTEM, messages)
             if not reply:
                 raise ValueError("empty response")
-            log.info("chat ok model=%s ip=%s turns=%d", name, ip, len(contents))
+            log.info("chat ok model=%s ip=%s turns=%d", name, ip, len(messages))
             return jsonify({"reply": reply, "model": name})
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")[:300]
+            last_error = f"{e.code} {body}"
+            log.warning("model %s failed: %s", name, last_error)
+            continue
         except Exception as e:  # noqa: BLE001 - we log and fall through to the next model
             last_error = e
             log.warning("model %s failed: %s", name, e)
