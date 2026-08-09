@@ -20,6 +20,14 @@ app = Flask(__name__)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ACCESS_CODE = os.getenv("ACCESS_CODE", "")
 
+# Live web access. Set WEB_SEARCH=off on Render to disable it entirely.
+# Each search costs roughly 1-2 cents (search fee + the extra tokens the
+# results add), versus a fraction of a cent for an ordinary reply - so the
+# system prompt tells Spark to search only when the answer depends on
+# current facts, and MAX_SEARCHES caps how many it can run per message.
+WEB_SEARCH = os.getenv("WEB_SEARCH", "on").lower() not in ("off", "false", "0")
+MAX_SEARCHES = int(os.getenv("MAX_SEARCHES", "3"))
+
 # Cheapest first; the loop falls back if a name is rejected.
 MODELS = [
     os.getenv("SPARK_MODEL", "claude-haiku-4-5"),
@@ -67,16 +75,25 @@ def room_add(role: str, name: str, text: str) -> dict:
         return msg
 
 
-def call_claude(model: str, system: str, messages: list) -> str:
-    payload = json.dumps({
+def call_claude(model: str, system: str, messages: list, use_search: bool = True) -> str:
+    body = {
         "model": model,
-        "max_tokens": 1500,
+        "max_tokens": 2000,
         "system": system,
         "messages": messages,
-    }).encode()
+    }
+    if use_search and WEB_SEARCH:
+        # Anthropic runs this search server-side and feeds the results back
+        # to the model before it answers - no separate search API needed.
+        body["tools"] = [{
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": MAX_SEARCHES,
+        }]
+
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
-        data=payload,
+        data=json.dumps(body).encode(),
         headers={
             "content-type": "application/json",
             "x-api-key": ANTHROPIC_API_KEY,
@@ -84,10 +101,28 @@ def call_claude(model: str, system: str, messages: list) -> str:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=120) as resp:
         data = json.loads(resp.read().decode())
+
     parts = data.get("content") or []
-    return "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+    text = "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+
+    # Collect the pages it actually cited, in order, without repeats.
+    sources: list = []
+    for p in parts:
+        for c in p.get("citations") or []:
+            url = c.get("url")
+            if url and not any(u == url for u, _ in sources):
+                sources.append((url, (c.get("title") or url)[:90]))
+
+    searches = (data.get("usage", {}).get("server_tool_use", {}) or {}).get("web_search_requests", 0)
+    if searches:
+        log.info("web search used: %d request(s), %d source(s)", searches, len(sources))
+    if sources:
+        text += "\n\n---\n**Sources**\n" + "\n".join(
+            f"- [{title}]({url})" for url, title in sources[:6]
+        )
+    return text
 
 
 # Facts about your business that Spark should always know.
@@ -118,9 +153,14 @@ BASE_SYSTEM = (
     "main alternative.\n"
     "6. Structure longer answers with light Markdown. Keep quick questions quick.\n"
     "7. If a request is missing a key fact, ask at most TWO sharp questions first.\n"
-    "8. Quantify when you can, state assumptions, never invent statistics - you have no live "
-    "data or internet access, and you flag that when it matters.\n"
-    "9. For legal, tax or regulated questions: practical picture first, then recommend a "
+    "8. You CAN search the web when you need current information - prices, dates, competitor "
+    "news, regulations, term dates, anything that changes over time. Search when the answer "
+    "genuinely depends on current facts, and say what you found and where it came from. Do NOT "
+    "search for things you already know, opinions, or questions about this conversation - each "
+    "search costs your employers money.\n"
+    "9. Quantify when you can, state assumptions, and never invent statistics or pretend to "
+    "have checked something you did not.\n"
+    "10. For legal, tax or regulated questions: practical picture first, then recommend a "
     "qualified professional for the final call."
 )
 
@@ -237,6 +277,17 @@ def chat():
                 body = e.read().decode(errors="replace")[:300]
                 last_error = f"{e.code} {body}"
                 log.warning("model %s failed: %s", model, last_error)
+                # If web search is the thing being rejected, answer without it
+                # rather than failing the whole message.
+                if e.code == 400 and "tool" in body.lower():
+                    try:
+                        reply = call_claude(model, BASE_SYSTEM, claude_messages, use_search=False)
+                        if reply:
+                            room_add("model", "Spark", reply)
+                            log.warning("answered without web search (tools rejected)")
+                            return jsonify({"ok": True, "search_disabled": True})
+                    except Exception as e2:  # noqa: BLE001
+                        log.warning("no-tools retry also failed: %s", e2)
                 continue
             except Exception as e:  # noqa: BLE001
                 last_error = e
@@ -315,7 +366,7 @@ HTML = """<!DOCTYPE html>
 <body>
     <aside>
         <div class="logo">SPARK AI</div>
-        <div class="tagline">Founders' room - one shared conversation for both of you, plus Spark.</div>
+        <div class="tagline">Founders' room - one shared conversation for both of you, plus Spark. Spark can search the web for current facts.</div>
         <div class="who">Signed in as <b id="whoami">…</b></div>
         <button class="side-btn" onclick="changeName()">Change my name</button>
         <button class="side-btn" onclick="clearRoom()">Clear room (for everyone)</button>
@@ -339,6 +390,7 @@ HTML = """<!DOCTYPE html>
     let busy = false;
     let pollInFlight = false;          // never let two polls overlap
     const seenIds = new Set();         // never render the same message twice
+    const pending = new Map();         // messages shown before the server confirmed them
 
     function autoGrow(el) { el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; }
 
@@ -376,6 +428,34 @@ HTML = """<!DOCTYPE html>
         w.appendChild(icon); w.appendChild(stack);
         c.appendChild(w);
         c.scrollTop = c.scrollHeight;
+        return w;
+    }
+
+    // Show my own message immediately, greyed out, before the server confirms it.
+    function renderPending(text) {
+        const w = render({role: 'user', name: myName, text: text});
+        w.style.opacity = '0.55';
+        const note = document.createElement('div');
+        note.style.cssText = 'font-size:11.5px;color:var(--muted);margin-top:4px';
+        note.textContent = 'sending…';
+        w.querySelector('.stack').appendChild(note);
+        const key = myName + '|' + text;
+        if (!pending.has(key)) pending.set(key, []);
+        pending.get(key).push(w);
+        return w;
+    }
+
+    // The server confirmed it - drop the temporary copy so it isn't shown twice.
+    function clearPending(name, text) {
+        const key = name + '|' + text;
+        const list = pending.get(key);
+        if (list && list.length) {
+            const el = list.shift();
+            el.remove();
+            if (!list.length) pending.delete(key);
+            return true;
+        }
+        return false;
     }
 
     async function poll() {
@@ -395,6 +475,7 @@ HTML = """<!DOCTYPE html>
             (d.messages || []).forEach(m => {
                 if (seenIds.has(m.id)) return;   // already on screen
                 seenIds.add(m.id);
+                if (m.role === 'user' && m.name === myName) clearPending(m.name, m.text);
                 render(m);
                 lastId = Math.max(lastId, m.id);
             });
@@ -417,6 +498,10 @@ HTML = """<!DOCTYPE html>
         busy = true;
         document.getElementById('sendBtn').disabled = true;
         i.value = ''; i.style.height = 'auto';
+        const ghost = renderPending(m);
+        const typing = document.getElementById('typing');
+        typing.style.display = '';
+        typing.textContent = 'Spark is thinking… (first message after a quiet spell can take up to a minute while the server wakes up)';
         try {
             const r = await fetch('/chat', {
                 method: 'POST',
@@ -429,7 +514,13 @@ HTML = """<!DOCTYPE html>
                 i.value = m; autoGrow(i);
             }
             if (d.error && !d.need_code) alert(d.error);
-        } catch (e) { alert('Connection error - try again.'); }
+            if (d.duplicate) { clearPending(myName, m); }
+        } catch (e) {
+            ghost.style.opacity = '1';
+            const note = ghost.querySelector('.stack div:last-child');
+            if (note) { note.textContent = 'failed to send - tap Send again'; note.style.color = '#f87171'; }
+            clearPending(myName, m);
+        }
         finally {
             busy = false;
             document.getElementById('sendBtn').disabled = false;
