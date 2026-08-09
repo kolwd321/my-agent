@@ -40,6 +40,21 @@ _next_id = 1
 _busy_with: str = ""      # name of whoever Spark is currently answering
 
 
+DUPLICATE_WINDOW = 20.0  # seconds
+
+
+def is_duplicate(name: str, text: str) -> bool:
+    """True if this exact message from this person just arrived."""
+    now = time.time()
+    with _room_lock:
+        for m in reversed(_room):
+            if now - m["ts"] > DUPLICATE_WINDOW:
+                break
+            if m["role"] == "user" and m["name"] == name and m["text"] == text:
+                return True
+    return False
+
+
 def room_add(role: str, name: str, text: str) -> dict:
     global _next_id
     with _room_lock:
@@ -179,6 +194,12 @@ def chat():
     if not ANTHROPIC_API_KEY:
         return jsonify({"error": "Server is missing ANTHROPIC_API_KEY - set it in Render > Environment."}), 500
 
+    # Ignore an identical repeat of the message we are already handling
+    # (double-click, browser retry, or a Render cold-start timeout retry).
+    if is_duplicate(name, msg):
+        log.info("duplicate suppressed from=%s", name)
+        return jsonify({"ok": True, "duplicate": True})
+
     # The human message goes into the shared room immediately,
     # so the other founder sees it even before Spark replies.
     room_add("user", name, msg)
@@ -204,7 +225,12 @@ def chat():
                 reply = call_claude(model, BASE_SYSTEM, claude_messages)
                 if not reply:
                     raise ValueError("empty response")
-                room_add("model", "Spark", reply)
+                with _room_lock:
+                    last_spark = next((m for m in reversed(_room) if m["role"] == "model"), None)
+                if last_spark and last_spark["text"] == reply and time.time() - last_spark["ts"] < 60:
+                    log.info("identical Spark reply suppressed")
+                else:
+                    room_add("model", "Spark", reply)
                 log.info("chat ok model=%s from=%s ip=%s", model, name, ip)
                 return jsonify({"ok": True})
             except urllib.error.HTTPError as e:
@@ -311,6 +337,8 @@ HTML = """<!DOCTYPE html>
     let accessCode = "";
     let lastId = 0;
     let busy = false;
+    let pollInFlight = false;          // never let two polls overlap
+    const seenIds = new Set();         // never render the same message twice
 
     function autoGrow(el) { el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; }
 
@@ -351,6 +379,8 @@ HTML = """<!DOCTYPE html>
     }
 
     async function poll() {
+        if (pollInFlight) return;      // a previous poll is still running - skip
+        pollInFlight = true;
         try {
             const r = await fetch('/messages', {
                 method: 'POST',
@@ -362,7 +392,12 @@ HTML = """<!DOCTYPE html>
                 accessCode = window.prompt('This is a private room. Enter the access code:') || '';
                 return;
             }
-            (d.messages || []).forEach(m => { render(m); lastId = Math.max(lastId, m.id); });
+            (d.messages || []).forEach(m => {
+                if (seenIds.has(m.id)) return;   // already on screen
+                seenIds.add(m.id);
+                render(m);
+                lastId = Math.max(lastId, m.id);
+            });
             const typing = document.getElementById('typing');
             if (d.busy_with) {
                 typing.style.display = '';
@@ -371,6 +406,7 @@ HTML = """<!DOCTYPE html>
                 typing.style.display = 'none';
             }
         } catch (e) { /* transient network issue - next poll will catch up */ }
+        finally { pollInFlight = false; }
     }
 
     async function send() {
@@ -407,6 +443,7 @@ HTML = """<!DOCTYPE html>
         await fetch('/clear', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({code: accessCode}) });
         document.getElementById('chat').innerHTML = '';
         lastId = 0;
+        seenIds.clear();
         await poll();
     }
 
