@@ -211,9 +211,21 @@ EMPLOYER_CONTEXT = os.getenv("SPARK_CONTEXT") or (
     "They are also experimenting with side projects like this assistant."
 )
 
+MEMORY_FACT = (
+    "IMPORTANT FACT ABOUT YOURSELF: this conversation is saved to a database and reloaded "
+    "automatically whenever the server restarts. You DO have persistent memory across sessions - "
+    "when your employers close the app and come back hours or days later, this conversation is "
+    "still here and you can see it. Never tell them you have no memory between sessions; that is "
+    "false for you.\n\n"
+    if MEMORY_ON else
+    "FACT ABOUT YOURSELF: this room is NOT saved - it resets if the server restarts, so anything "
+    "important should be written down elsewhere.\n\n"
+)
+
 BASE_SYSTEM = (
     "You are Spark, a private executive assistant employed by two co-founders, and you are all "
     "talking in ONE shared room - both founders see every message, including each other's.\n\n"
+    + MEMORY_FACT +
     "How you behave:\n"
     "1. Talk like a sharp, experienced colleague - natural first-person language, warm but "
     "efficient, contractions welcome, no corporate-brochure tone. Never open with 'As an AI'. "
@@ -276,6 +288,39 @@ def health():
         "room_messages": len(_room),
         "permanent_memory": MEMORY_ON,
     })
+
+
+@app.route("/memcheck")
+def memcheck():
+    """Writes a test row, reads it back, deletes it - and reports what happened."""
+    if not MEMORY_ON:
+        return jsonify({"memory": "not configured",
+                        "SUPABASE_URL_set": bool(SUPABASE_URL),
+                        "SUPABASE_SERVICE_KEY_set": bool(SUPABASE_SERVICE_KEY)})
+    result = {"url": SUPABASE_URL, "key_prefix": SUPABASE_SERVICE_KEY[:12] + "..."}
+    probe_id = 999999999
+    try:
+        _sb("POST", "spark_messages", {"id": probe_id, "role": "model", "name": "probe",
+                                       "text": "connection test", "ts": time.time()})
+        result["write"] = "OK"
+    except urllib.error.HTTPError as e:
+        result["write"] = f"FAILED {e.code}: {e.read().decode(errors='replace')[:200]}"
+        return jsonify(result)
+    except Exception as e:  # noqa: BLE001
+        result["write"] = f"FAILED: {e}"
+        return jsonify(result)
+    try:
+        rows = _sb("GET", f"spark_messages?select=id&id=eq.{probe_id}") or []
+        result["read_back"] = "OK" if rows else "wrote but could not read back"
+    except Exception as e:  # noqa: BLE001
+        result["read_back"] = f"FAILED: {e}"
+    try:
+        _sb("DELETE", f"spark_messages?id=eq.{probe_id}")
+        result["cleanup"] = "OK"
+    except Exception as e:  # noqa: BLE001
+        result["cleanup"] = f"FAILED: {e}"
+    result["verdict"] = "memory is working" if result.get("read_back") == "OK" else "memory is NOT working"
+    return jsonify(result)
 
 
 @app.route("/messages", methods=["POST"])
