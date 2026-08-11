@@ -28,6 +28,15 @@ ACCESS_CODE = os.getenv("ACCESS_CODE", "")
 WEB_SEARCH = os.getenv("WEB_SEARCH", "on").lower() not in ("off", "false", "0")
 MAX_SEARCHES = int(os.getenv("MAX_SEARCHES", "3"))
 
+# ---- Permanent memory (optional) -------------------------------------
+# Point these at a Supabase project and the room survives restarts,
+# redeploys and the free instance going to sleep. Leave them unset and
+# Spark still works exactly as before, just forgetting on restart.
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+MEMORY_ON = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
+HISTORY_ON_BOOT = int(os.getenv("HISTORY_ON_BOOT", "200"))
+
 # Cheapest first; the loop falls back if a name is rejected.
 MODELS = [
     os.getenv("SPARK_MODEL", "claude-haiku-4-5"),
@@ -46,6 +55,71 @@ _room_lock = threading.Lock()
 _room: list = []          # {id, role: "user"|"model", name, text, ts}
 _next_id = 1
 _busy_with: str = ""      # name of whoever Spark is currently answering
+
+
+# ============================================================
+# PERMANENT MEMORY - a single Supabase table holding the room.
+# Uses the REST API directly, so there is nothing extra to install.
+# The service key is server-side only and never reaches the browser.
+# ============================================================
+def _sb(method: str, path: str, body=None, timeout: int = 15):
+    req = urllib.request.Request(
+        f"{SUPABASE_URL}/rest/v1/{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={
+            "content-type": "application/json",
+            "apikey": SUPABASE_SERVICE_KEY,
+            "authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "prefer": "return=minimal",
+        },
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode()
+    return json.loads(raw) if raw.strip() else None
+
+
+def memory_load() -> None:
+    """Pull the saved conversation back into the room on startup."""
+    global _next_id
+    if not MEMORY_ON:
+        log.info("memory: not configured - room resets on restart")
+        return
+    try:
+        rows = _sb("GET", f"spark_messages?select=*&order=id.desc&limit={HISTORY_ON_BOOT}") or []
+        rows.reverse()
+        with _room_lock:
+            _room.clear()
+            for r in rows:
+                _room.append({"id": r["id"], "role": r["role"], "name": r["name"],
+                              "text": r["text"], "ts": float(r["ts"])})
+            _next_id = (_room[-1]["id"] + 1) if _room else 1
+        log.info("memory: restored %d messages", len(rows))
+    except Exception as e:  # noqa: BLE001
+        log.error("memory: could not load history (%s) - starting empty", e)
+
+
+def memory_save(msg: dict) -> None:
+    if not MEMORY_ON:
+        return
+    try:
+        _sb("POST", "spark_messages", {
+            "id": msg["id"], "role": msg["role"], "name": msg["name"],
+            "text": msg["text"], "ts": msg["ts"],
+        })
+    except Exception as e:  # noqa: BLE001
+        # Never lose the live conversation because saving failed.
+        log.error("memory: save failed (%s)", e)
+
+
+def memory_wipe() -> None:
+    if not MEMORY_ON:
+        return
+    try:
+        _sb("DELETE", "spark_messages?id=gt.0")
+        log.info("memory: wiped")
+    except Exception as e:  # noqa: BLE001
+        log.error("memory: wipe failed (%s)", e)
 
 
 DUPLICATE_WINDOW = 20.0  # seconds
@@ -69,10 +143,11 @@ def room_add(role: str, name: str, text: str) -> dict:
         msg = {"id": _next_id, "role": role, "name": name, "text": text, "ts": time.time()}
         _room.append(msg)
         _next_id += 1
-        # keep the room from growing forever
+        # keep the in-memory copy bounded; the database keeps everything
         if len(_room) > 500:
             del _room[: len(_room) - 500]
-        return msg
+    memory_save(msg)   # outside the lock - never block the room on the network
+    return msg
 
 
 def call_claude(model: str, system: str, messages: list, use_search: bool = True) -> str:
@@ -165,7 +240,7 @@ BASE_SYSTEM = (
 )
 
 MAX_MESSAGE_CHARS = 4000
-MAX_HISTORY_MESSAGES = 30  # recent room messages sent to the model
+MAX_HISTORY_MESSAGES = 40  # recent room messages sent to the model
 
 # --- Simple per-IP rate limit: 20 requests per minute (in-memory) ---
 _hits: dict = defaultdict(deque)
@@ -199,6 +274,7 @@ def health():
         "status": "ok",
         "key_configured": bool(ANTHROPIC_API_KEY),
         "room_messages": len(_room),
+        "permanent_memory": MEMORY_ON,
     })
 
 
@@ -307,6 +383,7 @@ def clear():
         return jsonify({"error": "access code required", "need_code": True}), 401
     with _room_lock:
         _room.clear()
+    memory_wipe()
     room_add("model", "Spark", "Fresh start. What are we working on?")
     return jsonify({"ok": True})
 
@@ -371,7 +448,7 @@ HTML = """<!DOCTYPE html>
         <button class="side-btn" onclick="changeName()">Change my name</button>
         <button class="side-btn" onclick="clearRoom()">Clear room (for everyone)</button>
         <div class="status"><span class="dot"></span><span id="statusText">Live - updates every few seconds</span></div>
-        <div class="disclaimer">The room resets if the server restarts (free hosting). Copy anything important somewhere safe. Spark gives general guidance, not professional legal or financial advice.</div>
+        <div class="disclaimer" id="memNote">Spark gives general guidance, not professional legal or financial advice.</div>
     </aside>
     <main>
         <div id="chat"></div>
@@ -542,6 +619,14 @@ HTML = """<!DOCTYPE html>
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     });
 
+    fetch('/health').then(r => r.json()).then(d => {
+        const note = document.getElementById('memNote');
+        note.textContent = (d.permanent_memory
+            ? 'Conversation is saved permanently - it survives restarts. '
+            : 'Not saved: this room resets if the server restarts. ')
+            + note.textContent;
+    }).catch(() => {});
+
     ensureName();
     poll();
     setInterval(poll, 2500);
@@ -549,6 +634,10 @@ HTML = """<!DOCTYPE html>
 </body>
 </html>
 """
+
+# Restore the conversation as soon as the app starts, however it is launched
+# (python app.py locally, or gunicorn/Render in production).
+memory_load()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
