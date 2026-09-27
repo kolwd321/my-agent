@@ -680,60 +680,158 @@ HTML = """<!DOCTYPE html>
 </html>
 """
 
-# Restore the conversation as soon as the app starts, however it is launched
-# (python app.py locally, or gunicorn/Render in production).
-memory_load()
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
 # ============================================================
-# Spark — Dion's social media manager
-# Paste this into app.py BELOW the daily report code
-# (it reuses SUPABASE_URL, SUPABASE_KEY, SLACK_WEBHOOK, REPORT_TOKEN, ANTHROPIC_KEY).
+# DION JOBS - daily stats report + daily social media posts
+# Triggered by opening:
+#   /daily-report?token=YOUR_REPORT_TOKEN
+#   /daily-posts?token=YOUR_REPORT_TOKEN
+# (cron-job.org opens them every morning).
+#
+# Uses its OWN settings on Render, separate from Spark's memory:
+#   DION_SUPABASE_URL, DION_SUPABASE_KEY, SLACK_WEBHOOK_URL, REPORT_TOKEN
+# Uses only what Spark already has installed - nothing to add to requirements.txt.
 # ============================================================
+import datetime
+import urllib.parse
 
-# CHANGE THESE to match your Supabase events table
-EVENTS_TABLE = "events"
-EVENT_TIME_COL = "starts_at"          # the column with the event's date/time
-# Only public-safe columns. NEVER add address, postcode, host name or phone here.
-SAFE_COLUMNS = "title,starts_at,area,description"
+DION_URL = os.getenv("DION_SUPABASE_URL", "").strip().rstrip("/")
+DION_KEY = os.getenv("DION_SUPABASE_KEY", "").strip()
+SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL", "").strip()
+REPORT_TOKEN = os.getenv("REPORT_TOKEN", "").strip()
+
+# Dion's real tables (hauz Supabase project)
+DION_TABLES = {
+    "New users": "profiles",
+    "New parties": "parties",
+    "New join requests": "join_requests",
+}
+# Only public-safe columns. Addresses live in party_addresses - never read that table here.
+SAFE_PARTY_COLUMNS = "name,description,starts_at,city,is_free"
 
 
-def upcoming_events(days=3):
-    """Get events happening in the next few days (safe columns only)."""
-    now = datetime.datetime.now(datetime.timezone.utc)
-    end = now + datetime.timedelta(days=days)
-    params = [
-        ("select", SAFE_COLUMNS),
-        (EVENT_TIME_COL, f"gte.{now.isoformat()}"),
-        (EVENT_TIME_COL, f"lte.{end.isoformat()}"),
-        ("order", f"{EVENT_TIME_COL}.asc"),
-        ("limit", "20"),
-        # If you have private events, add a filter like: ("is_public", "eq.true"),
-    ]
-    r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/{EVENTS_TABLE}",
-        params=params,
-        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
-        timeout=20,
+def _dion_missing_settings() -> list:
+    return [name for name, val in [
+        ("DION_SUPABASE_URL", DION_URL),
+        ("DION_SUPABASE_KEY", DION_KEY),
+        ("SLACK_WEBHOOK_URL", SLACK_WEBHOOK),
+        ("REPORT_TOKEN", REPORT_TOKEN),
+    ] if not val]
+
+
+def _dion_request(method: str, table: str, params: list):
+    url = f"{DION_URL}/rest/v1/{table}?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(
+        url,
+        headers={"apikey": DION_KEY, "prefer": "count=exact"},
+        method=method,
     )
-    r.raise_for_status()
-    return r.json()
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        body = resp.read().decode()
+        return resp.headers, (json.loads(body) if body.strip() else None)
+
+
+def _dion_count(table: str, since: str = None) -> int:
+    params = [("select", "*")]
+    if since:
+        params.append(("created_at", f"gte.{since}"))
+    headers, _ = _dion_request("HEAD", table, params)
+    total = (headers.get("Content-Range") or "*/0").split("/")[-1]
+    return int(total) if total.isdigit() else 0
+
+
+def _slack(text: str) -> None:
+    req = urllib.request.Request(
+        SLACK_WEBHOOK,
+        data=json.dumps({"text": text}).encode(),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        resp.read()
+
+
+def _dion_ask_claude(prompt: str, model: str) -> str:
+    """Uses Spark's existing call_claude, falling back to Spark's usual models."""
+    last_error = None
+    for m in [model] + MODELS:
+        try:
+            text = call_claude(
+                m,
+                "You write short, practical content for the founders of Dion.",
+                [{"role": "user", "content": prompt}],
+                use_search=False,
+            )
+            if text:
+                return text
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            log.warning("dion: model %s failed: %s", m, e)
+    raise RuntimeError(f"Claude failed: {last_error}")
+
+
+def _dion_error(e: Exception):
+    if isinstance(e, urllib.error.HTTPError):
+        detail = e.read().decode(errors="replace")[:300]
+        log.error("dion job failed: %s %s", e.code, detail)
+        return jsonify({"error": f"HTTP {e.code}", "detail": detail}), 502
+    log.error("dion job failed: %s", e)
+    return jsonify({"error": str(e)}), 502
+
+
+@app.route("/daily-report")
+def daily_report():
+    missing = _dion_missing_settings()
+    if missing:
+        return jsonify({"error": "missing settings on Render", "missing": missing}), 500
+    if request.args.get("token", "") != REPORT_TOKEN:
+        return jsonify({"error": "wrong or missing token"}), 403
+    try:
+        since = (datetime.datetime.now(datetime.timezone.utc)
+                 - datetime.timedelta(days=1)).isoformat()
+        stats = {
+            label: {"last 24h": _dion_count(table, since), "total": _dion_count(table)}
+            for label, table in DION_TABLES.items()
+        }
+        prompt = (
+            "You are Spark, reporting on Dion, a student party and events app launching "
+            f"in Sheffield. Numbers from the last 24 hours and all-time totals: {stats}. "
+            "Write a short Slack update (max 5 lines): the key numbers, one thing that looks "
+            "good or worrying, and one simple suggestion. Plain text, no fluff."
+        )
+        summary = _dion_ask_claude(prompt, "claude-haiku-4-5")
+        _slack("📊 Dion daily report\n" + summary)
+        return jsonify({"ok": True, "sent": "daily report", "stats": stats})
+    except Exception as e:  # noqa: BLE001
+        return _dion_error(e)
 
 
 @app.route("/daily-posts")
 def daily_posts():
-    if request.args.get("token") != REPORT_TOKEN:
-        abort(403)
+    missing = _dion_missing_settings()
+    if missing:
+        return jsonify({"error": "missing settings on Render", "missing": missing}), 500
+    if request.args.get("token", "") != REPORT_TOKEN:
+        return jsonify({"error": "wrong or missing token"}), 403
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        end = now + datetime.timedelta(days=3)
+        _, parties = _dion_request("GET", "parties", [
+            ("select", SAFE_PARTY_COLUMNS),
+            ("starts_at", f"gte.{now.isoformat()}"),
+            ("starts_at", f"lte.{end.isoformat()}"),
+            ("status", "eq.published"),
+            ("order", "starts_at.asc"),
+            ("limit", "20"),
+        ])
+        parties = parties or []
 
-    events = upcoming_events()
-
-    prompt = f"""You are Spark, the social media manager for Dion, an app where
+        prompt = f"""You are Spark, the social media manager for Dion, an app where
 Sheffield university students find and host house parties and events.
 Dion is on Android now.
 
-Here are the events on Dion in the next 3 days:
-{events if events else "None yet."}
+Parties on Dion in the next 3 days:
+{parties if parties else "None yet."}
 
 Write today's content:
 
@@ -744,36 +842,27 @@ with a push to get Dion.
 TIKTOK (1 idea): a hook for the first 2 seconds, the on-screen text,
 and a short caption.
 
-If there are no events, make the posts about hosting your own party on Dion.
+If there are no parties, make the posts about hosting your own party on Dion.
+Ignore anything that looks like a test entry.
 
 STRICT SAFETY RULES:
 - Only mention general areas (like "Crookes" or "Broomhill").
 - Never include street names, house numbers, postcodes, or anyone's name,
-  even if they appear in an event description.
+  even if they appear in a party description.
 - No drinking-game or "get wasted" angles.
 
 Plain text, clearly labelled, no extra commentary."""
 
-    r = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": "claude-sonnet-5",   # better writing than Haiku; still cheap once a day
-            "max_tokens": 1000,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=90,
-    )
-    r.raise_for_status()
-    posts = r.json()["content"][0]["text"]
+        posts = _dion_ask_claude(prompt, "claude-sonnet-5")
+        _slack("📣 Today's Dion posts (check before posting!)\n\n" + posts)
+        return jsonify({"ok": True, "sent": "daily posts", "parties_found": len(parties)})
+    except Exception as e:  # noqa: BLE001
+        return _dion_error(e)
 
-    requests.post(
-        SLACK_WEBHOOK,
-        json={"text": "📣 Today's Dion posts (check before posting!)\n\n" + posts},
-        timeout=20,
-    )
-    return "Posts sent"
+
+# Restore the conversation as soon as the app starts, however it is launched
+# (python app.py locally, or gunicorn/Render in production).
+memory_load()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
