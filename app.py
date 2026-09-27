@@ -686,3 +686,94 @@ memory_load()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+# ============================================================
+# Spark — Dion's social media manager
+# Paste this into app.py BELOW the daily report code
+# (it reuses SUPABASE_URL, SUPABASE_KEY, SLACK_WEBHOOK, REPORT_TOKEN, ANTHROPIC_KEY).
+# ============================================================
+
+# CHANGE THESE to match your Supabase events table
+EVENTS_TABLE = "events"
+EVENT_TIME_COL = "starts_at"          # the column with the event's date/time
+# Only public-safe columns. NEVER add address, postcode, host name or phone here.
+SAFE_COLUMNS = "title,starts_at,area,description"
+
+
+def upcoming_events(days=3):
+    """Get events happening in the next few days (safe columns only)."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    end = now + datetime.timedelta(days=days)
+    params = [
+        ("select", SAFE_COLUMNS),
+        (EVENT_TIME_COL, f"gte.{now.isoformat()}"),
+        (EVENT_TIME_COL, f"lte.{end.isoformat()}"),
+        ("order", f"{EVENT_TIME_COL}.asc"),
+        ("limit", "20"),
+        # If you have private events, add a filter like: ("is_public", "eq.true"),
+    ]
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/{EVENTS_TABLE}",
+        params=params,
+        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+@app.route("/daily-posts")
+def daily_posts():
+    if request.args.get("token") != REPORT_TOKEN:
+        abort(403)
+
+    events = upcoming_events()
+
+    prompt = f"""You are Spark, the social media manager for Dion, an app where
+Sheffield university students find and host house parties and events.
+Dion is on Android now.
+
+Here are the events on Dion in the next 3 days:
+{events if events else "None yet."}
+
+Write today's content:
+
+INSTAGRAM (2 options): a short caption each (under 40 words), fun and
+casual, written like a student not a brand, a couple of emojis, ending
+with a push to get Dion.
+
+TIKTOK (1 idea): a hook for the first 2 seconds, the on-screen text,
+and a short caption.
+
+If there are no events, make the posts about hosting your own party on Dion.
+
+STRICT SAFETY RULES:
+- Only mention general areas (like "Crookes" or "Broomhill").
+- Never include street names, house numbers, postcodes, or anyone's name,
+  even if they appear in an event description.
+- No drinking-game or "get wasted" angles.
+
+Plain text, clearly labelled, no extra commentary."""
+
+    r = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": ANTHROPIC_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-sonnet-5",   # better writing than Haiku; still cheap once a day
+            "max_tokens": 1000,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=90,
+    )
+    r.raise_for_status()
+    posts = r.json()["content"][0]["text"]
+
+    requests.post(
+        SLACK_WEBHOOK,
+        json={"text": "📣 Today's Dion posts (check before posting!)\n\n" + posts},
+        timeout=20,
+    )
+    return "Posts sent"
